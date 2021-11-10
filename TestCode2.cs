@@ -1,5 +1,3 @@
-
-
 // 
 // "Ctrl+ M, O is your friend"
 //
@@ -19,7 +17,6 @@
 //
 //      Tested as: Calling from Medium IL user not belonging to BUILTIN\Administrators group.
 //          See full test notes below in method:  RunApp_UseAnotherAccountAdminPW_TestCode()
-
 
 using System;
 using System.ComponentModel;
@@ -197,6 +194,9 @@ public class TestCode2
 
         return ret;
     }
+
+
+
 
 
     #region String Splitting Helper Methods
