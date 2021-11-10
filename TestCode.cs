@@ -2,15 +2,23 @@
 
 // 
 // "Ctrl+M, O is your friend"
-// Welcome to use any code or declares. Would appriciate it if referenced it back here: https://github.com/AltF5?tab=repositories
+//
+// Welcome to use any code or declares. Would appriciate it if referenced it back here:
+//      github.com/AltF5?tab=repositories
+//      https://github.com/AltF5/MediumToHighIL_Test/blob/main/TestCode.cs
+//
 //
 // Uploaded for Antonio Cocomazzi (@splinter_code)
-// https://twitter.com/splinter_code/status/1458054161472307204
+//      https://twitter.com/splinter_code/status/1458054161472307204
 //
+// History:
+//      11-9-21 - Created - @winlogon0
 // 
-// Problem experiencing:    Not a High IL token after CreateProcessWithLogonW (CPWLW)... per my reply : twitter.com/winlogon0/status/1458233639548899331
-// Tested as: Calling from Medium IL user not belonging to BUILTIN\Administrators group.
+// Problem experiencing:
+//      Not a High IL token after CreateProcessWithLogonW (CPWLW)... per my reply : twitter.com/winlogon0/status/1458233639548899331
+//      Tested as: Calling from Medium IL user not belonging to BUILTIN\Administrators group.
 //            See full test notes below in method:  RunApp_UseAnotherAccountAdminPW_TestCode()
+
 
 using System;
 using System.ComponentModel;
@@ -18,7 +26,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-public class TestCode
+public class TestCode2
 {
     /// <summary>
     /// Antonio Cocomazzi @splinter_code solution to his Quiz in Nov 2021 - created by winlogon0 to test it
