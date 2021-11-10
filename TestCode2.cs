@@ -3,7 +3,7 @@
 //
 // Welcome to use any code or declares. Would appriciate it if referenced it back here:
 //      github.com/AltF5?tab=repositories
-//      https://github.com/AltF5/MediumToHighIL_Test/blob/main/TestCode.cs
+//      https://github.com/AltF5/MediumToHighIL_Test/blob/main/TestCode2.cs
 //
 //      Uploaded for Antonio Cocomazzi (@splinter_code). This is his technique he described.
 //      https://twitter.com/splinter_code/status/1458054161472307204
