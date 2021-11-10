@@ -74,6 +74,7 @@ public class TestCode2
         //
 
         // -- Noticed --
+        // 1.
         // Available privileges in token despite medium IL (IF MANUALLY ADDED via secpol.msc)
         //      If the Admin-group containing user is directly (or indirectly via group membership) manually added to LSA User Right Privileges, then the following Privileges will 
         //      PERSIST, and ARE enabled via ProcessHacker, despite these should never belong in a Medium IL token
@@ -106,12 +107,9 @@ public class TestCode2
         //      SeTimeZonePrivilege
         //      SeCreateSymbolicLinkPrivilege
         //
+        // 2.
         // Also noticed how the window GUI border is thin/"classic" due to the Logon ID being not accurate (we are not using LsaLogonUser here to add a group)
 
-
-        // To fix (but appears unaffected): GrantEveryoneAccessToProcess not working (Access Denied) when a Medium IL Caller (not in Administrator group)
-        //          However doing it doesn't help, as attempted this PH
-        //
 
         SplitUserAndDomain(adminAccountName, out bool justUserSupplied, out string userOnly, out string domainIfSupplied);
         if (justUserSupplied)
@@ -150,7 +148,7 @@ public class TestCode2
             const int LOGON_WITH_PROFILE = 1;                   // <=========================== CHANGE FROM ORIGINAL TECHNIQUE
             const int LOGON_NETCREDENTIALS_ONLY = 2;            // ERROR_INVALID_LOGON_TYPE
 
-            bool didCreate = CreateProcessWithLogonW(userOnly, domainIfSupplied, pwToAdminAccount, LOGON_WITH_PROFILE,
+            bool didCreate = CreateProcessWithLogonW(userOnly, domainIfSupplied, pwToAdminAccount, LOGON_NETCREDENTIALS_ONLY,
                 null, fullCmdLine,
                 (uint)CreationFlags.CREATE_NEW_CONSOLE | (uint)CreationFlags.CREATE_UNICODE_ENVIRONMENT,
                 IntPtr.Zero, null,
