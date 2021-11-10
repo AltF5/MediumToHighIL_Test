@@ -107,7 +107,7 @@ public class TestCode2
         //      SeTimeZonePrivilege
         //      SeCreateSymbolicLinkPrivilege
         //
-        // Also noticed how the Window Border is "classic" due to the Logon ID being not accurate (we are not using LsaLogonUser here to add a group)
+        // Also noticed how the window GUI border is thin/"classic" due to the Logon ID being not accurate (we are not using LsaLogonUser here to add a group)
 
 
         // To fix (but appears unaffected): GrantEveryoneAccessToProcess not working (Access Denied) when a Medium IL Caller (not in Administrator group)
