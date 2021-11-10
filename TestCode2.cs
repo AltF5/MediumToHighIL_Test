@@ -154,7 +154,7 @@ public class TestCode2
 
 
             //
-            // 4. Execute! (using the same creds again)
+            // 5. Execute! (using the same creds again)
             //
             PROCESS_INFORMATION pi;
             STARTUPINFO_W si = new STARTUPINFO_W();
