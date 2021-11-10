@@ -1,21 +1,21 @@
 
 
 // 
-// "Ctrl+M, O is your friend"
+// "Ctrl+ M, O is your friend"
 //
 // Welcome to use any code or declares. Would appriciate it if referenced it back here:
 //      github.com/AltF5?tab=repositories
 //      https://github.com/AltF5/MediumToHighIL_Test/blob/main/TestCode.cs
 //
-//
-// Uploaded for Antonio Cocomazzi (@splinter_code)
+// Uploaded for Antonio Cocomazzi (@splinter_code). This is his technique he described.
 //      https://twitter.com/splinter_code/status/1458054161472307204
 //
 // History:
-//      11-9-21 - Created - @winlogon0
+//      11-9-21 - @winlogon0 Created this as described
 // 
 // Problem experiencing:
-//      Not a High IL token after CreateProcessWithLogonW (CPWLW)... per my reply : twitter.com/winlogon0/status/1458233639548899331
+//      Not a High IL cmd.exe token after CreateProcessWithLogonW (CPWLW)... per my reply : twitter.com/winlogon0/status/1458233639548899331
+//          despite it containing BUILTI\Administrators group, and executing as that user
 //      Tested as: Calling from Medium IL user not belonging to BUILTIN\Administrators group.
 //            See full test notes below in method:  RunApp_UseAnotherAccountAdminPW_TestCode()
 
@@ -62,7 +62,7 @@ public class TestCode2
 
         // -- Call via --
         //      Execute this code from an account NOT belonging to BUILTI\Administrators group (compmgmt.msc)
-        //      RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe", "AdminAcct", "itsPW");
+        //      TestCode2.RunApp_UseAnotherAccountAdminPW_TestCode("cmd.exe", "AdminAcct", "itsPW");                // <== Set an Admin Account Creds in the call
 
         // -- Result --
         //      This creates a process as the other another user with the BUILTIN\Administrators group
@@ -105,6 +105,8 @@ public class TestCode2
         //      SeIncreaseWorkingSetPrivilege
         //      SeTimeZonePrivilege
         //      SeCreateSymbolicLinkPrivilege
+        //
+        // Also noticed how the Window Border is "classic" due to the Logon ID being not accurate (we are not using LsaLogonUser here to add a group)
 
 
         // To fix (but appears unaffected): GrantEveryoneAccessToProcess not working (Access Denied) when a Medium IL Caller (not in Administrator group)
