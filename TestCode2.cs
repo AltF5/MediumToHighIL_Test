@@ -13,7 +13,7 @@
 // 
 // Problem experiencing:
 //      Not a High IL cmd.exe token after CreateProcessWithLogonW (CPWLW)... per my reply : twitter.com/winlogon0/status/1458233639548899331
-//          despite it containing BUILTI\Administrators group, and executing as that user
+//          The process (executing as that user) does contain BUILTI\Administrators group, but it is DENY
 //
 //      Tested as: Calling from Medium IL user not belonging to BUILTIN\Administrators group.
 //          See full test notes below in method:  RunApp_UseAnotherAccountAdminPW_TestCode()
@@ -23,6 +23,8 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 
 public class TestCode2
 {
@@ -74,7 +76,7 @@ public class TestCode2
         // -- Noticed --
         // Available privileges in token despite medium IL (IF MANUALLY ADDED via secpol.msc)
         //      If the Admin-group containing user is directly (or indirectly via group membership) manually added to LSA User Right Privileges, then the following Privileges will 
-        //      PERSIST, and ARE enableable via ProcessHacker, despite these should never belong in a Medium IL token
+        //      PERSIST, and ARE enabled via ProcessHacker, despite these should never belong in a Medium IL token
         //      [Notice no SeDebug, SeImpersonate, or SeTcb]
         //       All of these are enable-able as well (via ProcessHacker), despite only 2 being enabled by default: SeChangeNotify, SeCreateGlobal
         //
@@ -133,11 +135,9 @@ public class TestCode2
         {
             bool didSetIL = SetTokenIntegrityLevel(hTokenOutput, IntegrityLevel.Medium);
 
-            // NOT currently working -- Set a BP before here and do via PH manually         // <=========== temp manual step
-            // However it doesn't help the issue
-
-            //bool didDeleteDACL = GrantEveryoneAccessToProcess(GetCurrentProcessId(), true);
-            //bool didGrantEveryone = GrantEveryoneAccessToProcess(GetCurrentProcessId(), false);
+            // Required, otherwise CreateProcessWithLogonW w/ (LOGON_WITH_PROFILE -- different from originally described) = Access Denied (Error: 5)
+            bool didDeleteDACL = GrantEveryoneAccessToProcess(GetCurrentProcessId(), true);             // Kill the DACL
+            //bool didGrantEveryone = GrantEveryoneAccessToProcess(GetCurrentProcessId(), false);       // OR: Everyone : Full Control
 
             bool didImpersonate = ImpersonateLoggedOnUser(hTokenOutput);                    // <=========== TBD -- Doesn't seem to matter whether we do this or not
 
@@ -194,7 +194,6 @@ public class TestCode2
 
         return ret;
     }
-
 
 
 
@@ -299,6 +298,607 @@ public class TestCode2
         {
             desktopName = "Default";        // Default back to "Default"
         }
+    }
+
+    #endregion
+
+    #region Security methods (Everyone : Full Control or DACL deleting)
+
+    /// <summary>
+    /// Switches the Owner to Everyone, and adds Everyone = Full Control to a Process  - Tested and Working - 9-16-19
+    ///     Just needs to be able to open the key with WRITE_DAC (modify the DACL) and READ_CONTROL (to read existing DACL)
+    ///     If only WRITE_DAC can be granted or justKillTheDacl = true, or something fails along the way, then the DACL is completely removed (set to NULL = not initialized = no security at all)
+    /// </summary>
+    public static bool GrantEveryoneAccessToProcess(int PID, bool justKillTheDacl = false, bool alsoSetOwnerToEveryone = false)
+    {
+        bool success = true;
+
+        IntPtr hHandle = IntPtr.Zero;
+        bool didAddEveryoneAce = false;
+
+        if (!justKillTheDacl)
+        {
+            if (alsoSetOwnerToEveryone)
+            {
+                // 1 - Open to just set owner : WRITE_OWNER + READ_CONTROL -- READ_CONTROL needed to read the current DACL
+                //     SetObjectOwner enables SeRestorePrivilege internally: "The following access rights are granted if this privilege is held: WRITE_DAC  WRITE_OWNER  ACCESS_SYSTEM_SECURITY  FILE_GENERIC_WRITE  FILE_ADD_FILE  FILE_ADD_SUBDIRECTORY  DELETE"
+                hHandle = OpenProcess((int)ACCESS_MASK.WRITE_OWNER | (int)ACCESS_MASK.READ_CONTROL, false, PID);
+                bool didSet = false;
+                if (hHandle != IntPtr.Zero)
+                {
+                    didSet = SetObjectOwner(hHandle, System.Security.Principal.WellKnownSidType.WorldSid);        // Owner = Everyone
+                    CloseHandle(hHandle);
+                }
+            }
+
+
+            hHandle = IntPtr.Zero;      // Reset
+
+
+            // 2 - Do again, but now open to modify the DACL (WRITE_DAC) + READ_CONTROL, which is neccessary for AddPermissionsToObject to call GetKernelObjectSecurity to get the current DACL
+            hHandle = OpenProcess((int)ACCESS_MASK.WRITE_DAC | (int)ACCESS_MASK.READ_CONTROL, false, PID);      // calls CreateFile to open the file
+
+            if (hHandle != IntPtr.Zero)
+            {
+                // Everyone = Full Control (PROCESS_ALL_ACCESS)
+                int fullControlAccessRightsToGrant = (int)ProcessAccessFlags.All;
+                didAddEveryoneAce = AddPermissionsToObject(hHandle, fullControlAccessRightsToGrant, true, System.Security.Principal.WellKnownSidType.WorldSid);
+                CloseHandle(hHandle);
+
+                success = didAddEveryoneAce;
+            }
+        }
+
+        // If failed to add the Everyone ACE to the DACL, or it couldn't even be opened, just try to open it with WRITE_DAC, and kill the whole security descriptor
+        if (justKillTheDacl || !didAddEveryoneAce || hHandle == IntPtr.Zero)
+        {
+            hHandle = OpenProcess((int)ACCESS_MASK.WRITE_DAC, false, PID);
+            bool didEliminateAllSecurity = AddBlankPermissionsToObject(hHandle);
+            CloseHandle(hHandle);
+
+            success = didEliminateAllSecurity;
+        }
+
+        return success;
+    }
+
+    /// <summary>
+    /// CAUTION!!!!!!!!!!!!!!!!!!!!
+    /// Feb 2021 : Do not add a blank DACL to a Desktop NT Object Directory. Handles appear OK without problem. If this is cleared from the Desktop the many apps like Chrome crash over and over until a reboot is performed
+    ///            So basically ensure setObjectDirectlyAlso = false!!!!!! 
+    /// 
+    /// Replaces the object's Security Descriptor's DACL (not the whole SD) with a new that that has is NULL DACL (Not initialized). -- This does not appear to be possible in the Windows ACL Editor
+    ///     Notice: This is not the same as Blank.A Blank DACL (DACL is initalized and Deny everyone) -- This is what can be done in the Windows ACL Editor
+    /// NULL DACL = ANY access, by ANYONE -- Similar to Everyone/World : Full Control
+    /// This can only be done on one object at a time. For Files / Directories, this would need to be done recursively, since only Trustee ACE's are inherited, not an entire DACL
+    /// 
+    /// Handle MUST have been opened with at least WRITE_DAC information. Ideally also with WRITE_OWNER, since the owner is attempted to be changed to Everyone (World) first
+    /// 
+    /// Calls SetKernelObjectSecurity, which does work for Files and Directories
+    /// 
+    /// The Windows ACL Editor will show the following when an object's DACL is null "No permissions have been assigned for this object. Warning: this is a potential security risk because anyone who can access this object can take ownership of it. The object’s owner should assign permissions as soon as possible."
+    /// 
+    /// </summary>
+    public static bool AddBlankPermissionsToObject(IntPtr objectHandle, bool callingMultipleTimesNow = false, bool setObjectDirectlyAlso_USE_EXTREME_CAUTION = false)
+    {
+        //if (!callingMultipleTimesNow)
+        //{
+        //    AddBlankPermissionsToObject_DidEnableRestore = false;
+        //}
+        //else if (callingMultipleTimesNow && !AddBlankPermissionsToObject_DidEnableRestore)
+        //{
+        //    // Determine if this thread has a token
+        //    bool isMyThreadImpersonating = DoesThisThreadHaveAToken();
+        //
+        //    // REQUIRED - enable SeRestorePrivilege privilege to set the owner on an object
+        //    // This is not mentioned on the SECURITY_INFORMATION documentation. The only API I see it on is here
+        //    // SetNamedSecurityInfo  - https://msdn.microsoft.com/en-us/library/windows/desktop/aa379579(v=vs.85).aspx
+        //    //    "If the caller does not have the SeRestorePrivilege constant (see Privilege Constants), this SID must be contained in the caller's token, and must have the SE_GROUP_OWNER permission enabled."
+        //    
+        //    string ownerSetPrivilegeName = "SeRestorePrivilege";
+        //    if (isMyThreadImpersonating)
+        //    {
+        //        EnableThreadPrivilege(ownerSetPrivilegeName);               // If this thread is impersonating, then the Thread privilege will be sufficient (if its available)
+        //    }
+        //    else
+        //    {
+        //        EnableProcessPrivilege(ownerSetPrivilegeName);              // Also enable on the procsss (if its not in the impersonating thread (it should always), but it is in the process, it will still work
+        //    }
+        //
+        //    AddBlankPermissionsToObject_DidEnableRestore = true;
+        //}
+
+
+
+        SecurityIdentifier everyoneSID = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+
+        // Try first setting the object owner:
+        var sd = new RawSecurityDescriptor(ControlFlags.None, null, null, null, null);
+        sd.Owner = everyoneSID;
+        bool setOwner = SetObjectOwner(objectHandle, sd);
+
+
+        // Blank (NULL DACL) - No ACLs set in the Permissions List.
+        // In many ways this is better than adding in Everyone, because this is simply ANY access by ANYONE
+        sd = new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent, null, null, null, null);
+
+        // API: SetKernelObjectSecurity
+        bool success = SetObjectSecurity(
+            objectHandle,
+            sd,
+            setObjectDirectlyAlso: setObjectDirectlyAlso_USE_EXTREME_CAUTION);
+
+
+        return success;
+
+        // C++ way purely with Windows API:
+        //  https://docs.microsoft.com/en-us/windows/desktop/secauthz/creating-a-security-descriptor-for-a-new-object-in-c--
+        //      AllocateAndInitializeSid for Everyone, BUILTIN\Administrators, EXPLICIT_ACCESS structure, LocalAlloc for SECURITY_DESCRIPTOR_MIN_LENGTH,
+        //      InitializeSecurityDescriptor w/ SECURITY_DESCRIPTOR_REVISION, SetSecurityDescriptorDacl, lastly RegCreateKeyEx w/ the SECURITY_ATTRIBUTES stucture containing the SD
+        //
+        // C++ Explanation - Step 4 thru 11
+        // https://msdn.microsoft.com/en-us/library/ms707085(v=vs.85).aspx
+        //
+        // Example on a directory:
+        // https://stackoverflow.com/questions/690780/how-to-create-directory-with-all-rights-granted-to-everyone
+    }
+
+
+
+    /// <summary>
+    /// Everyone : Full Control
+    /// 
+    /// Adds the specified Access Right permissions into the DACL's ACE for the user Everyone (World SID) or another SID specified. 
+    /// NOTE: Do NOT specify MAXIMUM_ALLOWED, or else no permissions will be granted.
+    /// Full Control = [xxxx]_ALL_ACCESS | GENERIC_ALL
+    /// </summary>
+    /// <param user="objectHandle">An object opened with the READ_CONTROL and WRITE_DAC access right. Also include WRITE_OWNER in the event that the owner needs to be set
+    ///                            Additional possibilities for what it needs to be opened with is found here -
+    /// </param>
+    /// <param user="accessRightPermissions">Desired access right. DO NOT pass MAXIMUM_ALLOWED, or no permissions will be granted.</param>
+    /// <param user="allow">Allow or Deny the access right</param>
+    public static bool AddPermissionsToObject(IntPtr objectHandle, int accessRightPermissions, bool allow = true, WellKnownSidType userSid = WellKnownSidType.WorldSid, bool setObjectDirectlyAlso = true)
+    {
+        bool ret = true;
+
+        RawSecurityDescriptor currentDaclSDRead;
+        bool success = GetObjectSecurity(objectHandle, out currentDaclSDRead);
+        if (success)
+        {
+            if (currentDaclSDRead.DiscretionaryAcl == null)
+            {
+                Status("[W] [AddPermissionsToObject] DACL is null (no security). Creating a new DACL (RawAcl) to add Everyone");
+
+                // Generate a new DACL
+                const int RevisionNumber = 4;                       // Unclear what these numbers represent but this value of 4 one is shown here in this VB.net exmaple utilizing AccessControlList() instead of RawAcl() - docs.microsoft.com/en-us/windows/win32/ad/example-code-for-creating-a-security-descriptor
+                int numberOfEntriesThisACEWillContain = 1;
+                currentDaclSDRead.DiscretionaryAcl = new RawAcl(RevisionNumber, numberOfEntriesThisACEWillContain);
+            }
+
+            AceQualifier allowedOrDenied;
+            if (allow)
+            {
+                allowedOrDenied = AceQualifier.AccessAllowed;
+            }
+            else
+            {
+                allowedOrDenied = AceQualifier.AccessDenied;
+            }
+
+
+            SecurityIdentifier everyoneSid = new SecurityIdentifier(userSid, null);
+
+            CommonAce everyoneAce = new CommonAce(AceFlags.None, allowedOrDenied, accessRightPermissions, everyoneSid, false, null);
+            currentDaclSDRead.DiscretionaryAcl.InsertAce(0, everyoneAce);
+
+            // API: SetKernelObjectSecurity
+            success = SetObjectSecurity(objectHandle, currentDaclSDRead,
+                setObjectDirectlyAlso: setObjectDirectlyAlso);
+
+            if (!success)
+            {
+                // Try setting the owner, and then try this again
+                currentDaclSDRead.Owner = everyoneSid;
+                success = SetObjectOwner(objectHandle, currentDaclSDRead);
+
+                if (success)
+                {
+                    // Try to change the access right again
+                    success = SetObjectSecurity(objectHandle, currentDaclSDRead,
+                        setObjectDirectlyAlso: setObjectDirectlyAlso);
+                }
+            }
+        }
+
+        ret = success;
+
+        return ret;
+
+        // More info
+        //
+        // - Code for .NETs CommonAce - https://referencesource.microsoft.com/#mscorlib/system/security/accesscontrol/ace.cs
+        //
+        // - DACL_SECURITY_INFORMATION - What the handle must be opened with for GetKernelObjectSecurity and SetKernelObjectSecurity to succeed in their calls
+        //     SECURITY_INFORMATION - https://msdn.microsoft.com/en-us/library/windows/desktop/aa379573(v=vs.85).aspx
+        //
+        // WellKnownSidType.WorldSid = Everyone
+        // See - https://msdn.microsoft.com/en-us/library/windows/desktop/aa379649(v=vs.85).aspx
+
+    }
+
+
+
+
+    /// <summary>
+    /// GetKernelObjectSecurity w DACL_SECURITY_INFORMATION
+    /// MUST have READ_CONTROL granted to the opened object handle
+    /// </summary>
+    public static bool GetObjectSecurity(IntPtr objectHandle, out RawSecurityDescriptor sd)
+    {
+        // Originally From:     How to prevent users from killing your service or process -     http://csharptest.net/1043/how-to-prevent-users-from-killing-your-service-process/
+        //
+        // More info on Security Descriptor info from .NET Source - https://referencesource.microsoft.com/#mscorlib/system/security/accesscontrol/securitydescriptor.cs
+        // Including RawSecurityDescriptor, which is a subclass of GenericSecurityDescriptor
+
+        const int DACL_SECURITY_INFORMATION = 0x00000004;
+        byte[] psd = new byte[0];
+        uint bufSizeNeeded;
+
+        bool success = false;
+        sd = new RawSecurityDescriptor("");
+
+        // Call with 0 size to obtain the actual size needed in bufSizeNeeded
+        success = GetKernelObjectSecurity(objectHandle, DACL_SECURITY_INFORMATION, psd, 0, out bufSizeNeeded);
+
+        int err = Marshal.GetLastWin32Error();
+        if (err == 5)
+        {
+            // Access Denied was returned -- The handle must have not been opened with READ_CONTROL
+
+            IntPtr newHandle;
+            DuplicateHandle(GetCurrentProcess(), objectHandle, GetCurrentProcess(), out newHandle, (uint)ACCESS_MASK.READ_CONTROL, false, 0);
+
+            if (newHandle != IntPtr.Zero)
+            {
+                CloseHandle(objectHandle);
+                objectHandle = newHandle;
+            }
+        }
+
+        if (bufSizeNeeded < 0 || bufSizeNeeded > short.MaxValue)
+        {
+            Status("GetObjectSecurity - GetKernelObjectSecurity API didn't return the proper size" + GetLastErrorInfo());
+        }
+        else
+        {
+            success = GetKernelObjectSecurity(objectHandle, DACL_SECURITY_INFORMATION, psd = new byte[bufSizeNeeded], bufSizeNeeded, out bufSizeNeeded);
+            if (success == false)
+            {
+                Status("GetObjectSecurity - GetKernelObjectSecurity API failed. " + GetLastErrorInfo());
+            }
+        }
+
+        // Use the RawSecurityDescriptor class from System.Security.AccessControl to parse the bytes:
+        try
+        {
+            // Will throw an exception if the psd byte array is of size 0 (such as if GetKernelObjectSecurity fails)
+            sd = new RawSecurityDescriptor(psd, 0);
+        }
+        catch (Exception ex)
+        {
+            string s = ex.Source;       // Supress warning
+            Status("[e] [GetObjectSecurity]: Method blew up with a .NET exception: " + ex);
+            success = false;
+        }
+
+        return success;
+    }
+
+    /// <summary>
+    /// SetKernelObjectSecurity w DACL_SECURITY_INFORMATION
+    /// Aug 2018 - doesn't appear that setting the DACL and Owner with just 1 API call works
+    /// </summary>
+    public static bool SetObjectSecurity(IntPtr objectHandle, RawSecurityDescriptor SDWithDacl, bool setOwnerToo_NOTWORKING = false, bool setObjectDirectlyAlso = false)
+    {
+        // Notice: RawSecurityDescriptor is from .NET 4.5
+
+
+        bool ret = true;
+
+
+        // From SECURITY_INFORMATION - https://msdn.microsoft.com/en-us/library/windows/desktop/aa379573(v=vs.85).aspx
+        // Declares: https://msdn.microsoft.com/en-us/library/cc234251.aspx
+        const int DACL_SECURITY_INFORMATION = 0x00000004;
+
+        //const int OWNER_SECURITY_INFORMATION = 0x00000001;
+
+
+        byte[] rawSecurityDescriptor = new byte[SDWithDacl.BinaryLength];
+        SDWithDacl.GetBinaryForm(rawSecurityDescriptor, 0);
+
+        int infoToSetFlags = DACL_SECURITY_INFORMATION;
+        //if (setOwnerToo_NOTWORKING)
+        //{
+        //    infoToSetFlags |= OWNER_SECURITY_INFORMATION;
+        //}
+
+        bool success = SetKernelObjectSecurity(objectHandle, infoToSetFlags, rawSecurityDescriptor);
+        if (success == false)
+        {
+            Status("SetObjectSecurity - SetKernelObjectSecurity API failed. " + GetLastErrorInfo());
+        }
+
+        if (setObjectDirectlyAlso)
+        {
+            var status = NtSetSecurityObject(objectHandle, infoToSetFlags, rawSecurityDescriptor);
+            if (status != 0)
+            {
+                //string whyNT = GetErrorInfoNt(status);
+                Status("SetObjectSecurity - NtSetSecurityObject API failed to set the Object-specific security. " + GetLastErrorInfo());
+            }
+        }
+
+        ret = success;
+
+        return ret;
+    }
+
+    /// <summary>
+    /// MUST have READ_CONTROL + WRITE_OWNER granted to the opened object handle, due to calling GetObjectSecurity to get the current DACL for modification
+    /// SetObjectOwner internal enables SeRestorePrivilege to ensure it can be set.
+    /// </summary>
+    public static bool SetObjectOwner(IntPtr objectHandle, WellKnownSidType knownSid)
+    {
+        RawSecurityDescriptor currentDaclRead;
+        bool got = GetObjectSecurity(objectHandle, out currentDaclRead);
+
+        SecurityIdentifier sid = new SecurityIdentifier(knownSid, null);
+        currentDaclRead.Owner = sid;
+
+        return SetObjectOwner(objectHandle, currentDaclRead);
+    }
+
+    /// <summary>
+    /// Sets the owner on an object opened with WRITE_OWNER. If it wasn't then this method will Duplicate the handle and enable WRITE_OWNER.
+    /// Enables SeRestorePrivilege to ensure it can be set.
+    /// </summary>
+    /// <param user="objectHandle">A handle to the object to set the owner on, opened with at least WRITE_OWNER</param>
+    /// <param user="dacl">If null, then the Owner will be set to everyone</param>
+    /// <returns></returns>
+    public static bool SetObjectOwner(IntPtr objectHandle, RawSecurityDescriptor sdWithOwner = null, bool didCallerAlreadyEnable_RestorePriv = false)           // RawSecurityDescriptor is from .NET 4.5
+    {
+        bool ret = true;
+
+        // From SECURITY_INFORMATION - https://msdn.microsoft.com/en-us/library/windows/desktop/aa379573(v=vs.85).aspx
+        const int OWNER_SECURITY_INFORMATION = 0x00000001;
+
+        bool success;
+
+
+        if (sdWithOwner == null)
+        {
+            RawSecurityDescriptor currentDaclRead;
+            success = GetObjectSecurity(objectHandle, out currentDaclRead);
+
+            SecurityIdentifier everyoneSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);           // .Value = "S-1-1-0"
+            currentDaclRead.Owner = everyoneSid;
+
+            sdWithOwner = currentDaclRead;
+        }
+
+        byte[] rawSecurityDescriptor = new byte[sdWithOwner.BinaryLength];
+        sdWithOwner.GetBinaryForm(rawSecurityDescriptor, 0);
+
+        if (!didCallerAlreadyEnable_RestorePriv)
+        {
+            // Determine if this thread has a token
+            bool isMyThreadImpersonating = DoesThisThreadHaveAToken();
+
+            // REQUIRED - enable SeRestorePrivilege privilege to set the owner on an object
+            // This is not mentioned on the SECURITY_INFORMATION documentation. The only API I see it on is here
+            // SetNamedSecurityInfo  - https://msdn.microsoft.com/en-us/library/windows/desktop/aa379579(v=vs.85).aspx
+            //    "If the caller does not have the SeRestorePrivilege constant (see Privilege Constants), this SID must be contained in the caller's token, and must have the SE_GROUP_OWNER permission enabled."
+            
+            
+            
+            //string ownerSetPrivilegeName = "SeRestorePrivilege";
+            //if (isMyThreadImpersonating)
+            //{
+            //    EnableThreadPrivilege(ownerSetPrivilegeName);               // If this thread is impersonating, then the Thread privilege will be sufficient (if its available)
+            //}
+            //else
+            //{
+            //    EnableProcessPrivilege(ownerSetPrivilegeName);              // Also enable on the procsss (if its not in the impersonating thread (it should always), but it is in the process, it will still work
+            //}
+        }
+
+
+        success = SetKernelObjectSecurity(objectHandle, OWNER_SECURITY_INFORMATION, rawSecurityDescriptor);
+        if (success == false)
+        {
+            Status("SetObjectSecurity - SetKernelObjectSecurity API failed. " + GetLastErrorInfo());
+            Status("Reattempting after adding WRITE_OWNER");
+
+            // Result when reattempting for setting the owner to Everyone
+            //      SetKernelObjectSecurity API failed. Error: 0x51B (1307) - This security ID may not be assigned as the owner of this object
+            //      This occurs if SeRestorePrivilege is not set - found from - http://stackoverflow.com/questions/17479152/set-file-owner-to-non-existing-user-sid-in-windows
+            //      Odd enough SeTakeOwnershipPrivilege is not required and has no effect.
+            //      This is even with thread impersonation of SYSTEM
+            //
+            //      Below shows SetKernelObjectSecurity and SetSecurityInfo. They both have the same effect. Leaving in SetSecurityInfo to use as an example if needed
+
+            IntPtr newHandle;
+            uint accessRights = (uint)ACCESS_MASK.WRITE_OWNER;
+            DuplicateHandle(GetCurrentProcess(), objectHandle, GetCurrentProcess(), out newHandle, accessRights, false, 0);
+
+            success = SetKernelObjectSecurity(newHandle, OWNER_SECURITY_INFORMATION, rawSecurityDescriptor);
+            int err = 0;
+            if (!success)
+            {
+                err = Marshal.GetLastWin32Error();
+                Status("SetObjectSecurity - SetKernelObjectSecurity API failed. " + GetLastErrorInfo());
+            }
+
+
+            if (!success && err == 1307)     // Error: "This security ID may not be assigned as the owner of this object"
+            {
+                byte[] rawOwnerBytes = new byte[sdWithOwner.Owner.BinaryLength];
+                sdWithOwner.Owner.GetBinaryForm(rawOwnerBytes, 0);
+
+                // Same error
+                uint retErrorCode = SetSecurityInfo(newHandle, SE_OBJECT_TYPE.SE_KERNEL_OBJECT, SECURITY_INFORMATION.Owner, rawOwnerBytes, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+
+                if (retErrorCode != Win32Error.ERROR_SUCCESS)
+                {
+                    Status("SetObjectSecurity - SetSecurityInfo API failed. " + GetErrorInfo((int)retErrorCode));
+                }
+
+            }
+
+            CloseHandle(newHandle);
+        }
+
+        ret = success;
+
+        return ret;
+    }
+
+
+    /// <summary>
+    /// Calls SetSecurityInfo isntead (ex: for use with service handles) of SetKernelObjectSecurity which only works for standard kernel object handles (Processes, threads, tokens, other handles, file, registry keys)
+    /// </summary>
+    public static bool SetObjectOwner_NonStandardHandle(IntPtr objectHandle, SE_OBJECT_TYPE objectType, RawSecurityDescriptor sdWithOwner = null)
+    {
+        // From SECURITY_INFORMATION - https://msdn.microsoft.com/en-us/library/windows/desktop/aa379573(v=vs.85).aspx
+        const int OWNER_SECURITY_INFORMATION = 0x00000001;
+
+        bool success;
+
+        if (sdWithOwner == null)
+        {
+            RawSecurityDescriptor currentDaclRead;
+            success = GetObjectSecurity(objectHandle, out currentDaclRead);
+
+            SecurityIdentifier everyoneSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);           // .Value = "S-1-1-0"
+            currentDaclRead.Owner = everyoneSid;
+
+            sdWithOwner = currentDaclRead;
+        }
+
+        byte[] rawSecurityDescriptor = new byte[sdWithOwner.BinaryLength];
+        sdWithOwner.GetBinaryForm(rawSecurityDescriptor, 0);
+
+
+        //if (!didCallerAlreadyEnable_RestorePriv)
+        //{
+        //    // Determine if this thread has a token
+        //    bool isMyThreadImpersonating = DoesThisThreadHaveAToken();
+
+        //    // REQUIRED - enable SeRestorePrivilege privilege to set the owner on an object
+        //    // This is not mentioned on the SECURITY_INFORMATION documentation. The only API I see it on is here
+        //    // SetNamedSecurityInfo  - https://msdn.microsoft.com/en-us/library/windows/desktop/aa379579(v=vs.85).aspx
+        //    //    "If the caller does not have the SeRestorePrivilege constant (see Privilege Constants), this SID must be contained in the caller's token, and must have the SE_GROUP_OWNER permission enabled."
+        //    string ownerSetPrivilegeName = "SeRestorePrivilege";
+        //    if (isMyThreadImpersonating)
+        //    {
+        //        EnableThreadPrivilege(ownerSetPrivilegeName);               // If this thread is impersonating, then the Thread privilege will be sufficient (if its available)
+        //    }
+        //    else
+        //    {
+        //        EnableProcessPrivilege(ownerSetPrivilegeName);              // Also enable on the procsss (if its not in the impersonating thread (it should always), but it is in the process, it will still work
+        //    }
+        //}
+
+        byte[] rawOwnerBytes = new byte[sdWithOwner.Owner.BinaryLength];
+        sdWithOwner.Owner.GetBinaryForm(rawOwnerBytes, 0);
+
+        uint retCode = SetSecurityInfo(objectHandle, objectType, (SECURITY_INFORMATION)OWNER_SECURITY_INFORMATION, rawOwnerBytes, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        if (retCode != Win32Error.ERROR_SUCCESS)
+        {
+            Status("SetObjectOwner - SetSecurityInfo API failed. " + GetErrorInfo((int)retCode));
+
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
+
+    /// <summary>
+    /// SetKernelObjectSecurity w DACL_SECURITY_INFORMATION
+    /// Aug 2018 - doesn't appear that setting the DACL and Owner with just 1 API call works
+    /// </summary>
+    public static bool SetObjectSecurity_NonStandardHandle(IntPtr objectHandle, SE_OBJECT_TYPE objectType, RawSecurityDescriptor SDWithDacl)           // RawSecurityDescriptor is from .NET 4.5
+    {
+        // From SECURITY_INFORMATION - https://msdn.microsoft.com/en-us/library/windows/desktop/aa379573(v=vs.85).aspx
+        // Declares: https://msdn.microsoft.com/en-us/library/cc234251.aspx
+        const int DACL_SECURITY_INFORMATION = 0x00000004;
+
+        int infoToSetFlags = DACL_SECURITY_INFORMATION;
+
+        if (SDWithDacl.DiscretionaryAcl == null)
+        {
+            // Caller wants a NULL DACL = Anyone has access -- So imply pass IntPtr.Zero with the infoFlag set for changing the DACL
+            uint retCode = SetSecurityInfo(objectHandle, objectType, (SECURITY_INFORMATION)infoToSetFlags, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            if (retCode != Win32Error.ERROR_SUCCESS)
+            {
+                Status("SetObjectSecurity - SetSecurityInfo API failed. " + GetErrorInfo((int)retCode));
+
+                return false;
+            }
+            else
+            {
+                return true;
+            }
+        }
+        else
+        {
+            // Typical path
+
+            byte[] rawSecurityDescriptor_DaclOnly = new byte[SDWithDacl.DiscretionaryAcl.BinaryLength];
+            SDWithDacl.DiscretionaryAcl.GetBinaryForm(rawSecurityDescriptor_DaclOnly, 0);
+
+            uint retCode = SetSecurityInfo(objectHandle, objectType, (SECURITY_INFORMATION)infoToSetFlags, IntPtr.Zero, IntPtr.Zero, rawSecurityDescriptor_DaclOnly, IntPtr.Zero);
+            if (retCode != Win32Error.ERROR_SUCCESS)
+            {
+                Status("SetObjectSecurity - SetSecurityInfo API failed. " + GetErrorInfo((int)retCode));
+
+                return false;
+            }
+            else
+            {
+                return true;
+            }
+        }
+    }
+
+
+    /// <summary>
+    /// Determines if the current thread is impersonating (is assigned a token).
+    /// </summary>
+    public static bool DoesThisThreadHaveAToken()
+    {
+        bool ret = false;
+        bool success = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, false, out IntPtr hThreadToken);
+        if (success)
+        {
+            ret = true;
+
+            CloseHandle(hThreadToken);
+            // No closure needed for GetCurrentThread - "The pseudo handle need not be closed when it is no longer needed."
+        }
+        else
+        {
+            int err = Marshal.GetLastWin32Error();
+            if (err == 1008)     // 1008 Error code = "An attempt was made to reference a token that does not exist."   |   err.exe 1008 =  ERROR_NO_TOKEN
+            {
+                ret = false;
+            }
+        }
+
+        return ret;
     }
 
     #endregion
@@ -4494,7 +5094,7 @@ public class TestCode2
     #endregion
 
     #endregion
-    
+
 
 
     #region -- Win32 APIs, Structures, Enums --
@@ -5193,13 +5793,78 @@ public class TestCode2
     public static extern int GetCurrentProcessId();
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool CloseHandle(IntPtr hHandle);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
     public static extern IntPtr GetCurrentProcess();
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern IntPtr GetCurrentThread();
+
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(ProcessAccessFlags dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, int dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(int dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenThread(ThreadAccess dwDesiredAccess, bool bInheritHandle, uint dwThreadId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenThread(int dwDesiredAccess, bool bInheritHandle, int dwThreadId);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
+
+    /// <summary>
+    /// Setting OpenAsSelf is what I called "CheckAccessViaProcess" - True means the access check is made against the process' user security context.    False means use the thread's user security context.
+    ///
+    /// </summary>
+    /// <param name="ThreadHandle"></param>
+    /// <param name="DesiredAccess"></param>
+    /// <param name="CheckAccessViaProcess"></param>
+    /// <param name="TokenHandle"></param>
+    /// <returns></returns>
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool OpenThreadToken(IntPtr ThreadHandle, uint DesiredAccess, bool CheckAccessViaProcess, out IntPtr TokenHandle);
+
+
+    #endregion
+
+    #region Handle APIs
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hHandle);
+
+    /// <summary>
+    /// Basically DuplicateHandle() API
+    /// </summary>
+    [DllImport("ntdll.dll")]
+    static extern uint NtDuplicateObject(
+        IntPtr SourceProcessHandle,
+        IntPtr SourceHandle,
+        IntPtr TargetProcessHandle,
+        out IntPtr TargetHandle,
+        uint DesiredAccess, uint Attributes, uint Options);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetUserObjectInformation(IntPtr hObj, int nIndex, IntPtr pvInfo, int nLength, ref int lpnLengthNeeded);
+
+    public static int UOI_NAME = 2;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DuplicateHandle(IntPtr hSourceProcessHandle,
+       IntPtr hSourceHandle, IntPtr hTargetProcessHandle, out IntPtr lpTargetHandle,
+       uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwOptions);
+
+    // Flags (optional)
+    public const uint DUPLICATE_CLOSE_SOURCE = 1;
+    public const uint DUPLICATE_SAME_ACCESS = 2;
 
     #endregion
 
@@ -5236,6 +5901,485 @@ public class TestCode2
             return Wow64RevertWow64FsRedirection(wow64TogglePointer);
         }
     }
+
+    #endregion
+
+    #region Security APIs
+
+    // Some of these are from: http://csharptest.net/1043/how-to-prevent-users-from-killing-your-service-process/
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool SetKernelObjectSecurity(IntPtr Handle, int securityInformation, [In] byte[] pSecurityDescriptor);
+
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool GetKernelObjectSecurity(IntPtr Handle, int securityInformation, [Out] byte[] pSecurityDescriptor, uint nLength, out uint lpnLengthNeeded);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool GetKernelObjectSecurity(IntPtr objectHandle, uint securityInfoRequested, IntPtr pSecurityDescriptor, uint sizeOfSecurityDescriptor, out uint sizeNeeded);
+
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool SetSecurityDescriptorDacl(ref SECURITY_DESCRIPTOR sd, bool daclPresent, IntPtr dacl, bool daclDefaulted);
+
+    const int SECURITY_DESCRIPTOR_REVISION = 1;
+
+
+    /// <summary>
+    /// Sets the DACL, SACL, etc information of an object in WinObj, leveraging the same exact handle utilized by SetKernelObjectSecurity
+    /// - SetKernelObjectSecurity Sets a Handle opened to an object
+    /// - NtSetSecurityObject sets the actual objct itself
+    /// 
+    /// https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetsecurityobject
+    /// </summary>
+    /// <param name="hObject">Handle to the object with WRITE_DAC access granted to this process</param>
+    /// <param name="securityInformation">The SECURITY_INFORMATION type to set (DACL, SACL, Group, Owner)</param>
+    /// <param name="pSecurityDescriptor">PSECURITY_DESCRIPTOR ... see how utilized with SetKernelObjectSecurity</param>
+    /// <returns>NTSTATUS code</returns>
+    [DllImport("ntdll.dll")]
+    static extern uint NtSetSecurityObject(IntPtr hObject, int securityInformation, byte[] pSecurityDescriptor);
+
+
+
+    // Different definition here: http://stackoverflow.com/questions/5627438/a-working-net-example-using-setentriesinacl-interop-in-action
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    public struct EXPLICIT_ACCESS
+    {
+        uint grfAccessPermissions;
+        uint grfAccessMode;
+        uint grfInheritance;
+        TRUSTEE Trustee;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto, Pack = 4)]
+    public struct TRUSTEE
+    {
+        IntPtr pMultipleTrustee; // must be null
+        int MultipleTrusteeOperation;
+        int TrusteeForm;
+        int TrusteeType;
+        [MarshalAs(UnmanagedType.LPStr)]
+        string ptstrName;
+    }
+
+    public enum ACCESS_MODE : uint
+    {
+        NOT_USED_ACCESS = 0,
+        GRANT_ACCESS,
+        SET_ACCESS,
+        DENY_ACCESS,
+        REVOKE_ACCESS,
+        SET_AUDIT_SUCCESS,
+        SET_AUDIT_FAILURE
+    }
+
+    public enum SE_OBJECT_TYPE
+    {
+        SE_UNKNOWN_OBJECT_TYPE = 0,
+        SE_FILE_OBJECT,
+        SE_SERVICE,
+        SE_PRINTER,
+        SE_REGISTRY_KEY,
+        SE_LMSHARE,
+        SE_KERNEL_OBJECT,
+        SE_WINDOW_OBJECT,
+        SE_DS_OBJECT,
+        SE_DS_OBJECT_ALL,
+        SE_PROVIDER_DEFINED_OBJECT,
+        SE_WMIGUID_OBJECT,
+        SE_REGISTRY_WOW64_32KEY
+    }
+
+
+    [Flags]
+    public enum SECURITY_INFORMATION : uint
+    {
+        Owner = 0x00000001,
+        Group = 0x00000002,
+        Dacl = 0x00000004,                      // AKA: DACL_SECURITY_INFO
+        Sacl = 0x00000008,
+        ProtectedDacl = 0x80000000,
+        ProtectedSacl = 0x40000000,
+        UnprotectedDacl = 0x20000000,
+        UnprotectedSacl = 0x10000000
+    }
+
+
+
+
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern uint GetSecurityInfo
+    (
+        IntPtr handle,
+        SE_OBJECT_TYPE ObjectType,
+        SECURITY_INFORMATION SecurityInfo,
+        out IntPtr pSidOwner,
+        out IntPtr pSidGroup,
+        out IntPtr pDacl,
+        out IntPtr pSacl,
+        out IntPtr pSecurityDescriptor
+    );
+
+    // For optional parameters, and getting the Dacl
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern uint GetSecurityInfo
+    (
+        IntPtr handle,
+        SE_OBJECT_TYPE ObjectType,
+        SECURITY_INFORMATION SecurityInfo,
+        IntPtr pSidOwner,                   // IntPtr.Zero
+        IntPtr pSidGroup,                   // IntPtr.Zero
+        out IntPtr pDacl,
+        IntPtr pSacl,                       // IntPtr.Zero
+        IntPtr pSecurityDescriptor          // IntPtr.Zero
+    );
+
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool GetSecurityDescriptorDacl(IntPtr pSecurityDescriptor, out bool lpbDaclPresent, out IntPtr pDacl, out bool queryCCInfoUpdate_Result);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool SetKernelObjectSecurity(IntPtr Handle, int securityInformation, ref SECURITY_DESCRIPTOR pSecurityDescriptor);
+
+
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern uint SetSecurityInfo(IntPtr handle, SE_OBJECT_TYPE ObjectType, SECURITY_INFORMATION SecurityInfo, IntPtr psidOwner, IntPtr psidGroup, IntPtr pDacl, IntPtr pSacl);
+
+    /// <summary>
+    /// For setting Owner only
+    /// </summary>
+    /// <returns></returns>
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern uint SetSecurityInfo(IntPtr handle, SE_OBJECT_TYPE ObjectType, SECURITY_INFORMATION SecurityInfo, byte[] psidOwner, IntPtr psidGroup, IntPtr pDacl, IntPtr pSacl);
+
+    /// <summary>
+    /// For setting DACL only
+    /// </summary>
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern uint SetSecurityInfo(IntPtr handle, SE_OBJECT_TYPE ObjectType, SECURITY_INFORMATION SecurityInfo, IntPtr psidOwner, IntPtr psidGroup, byte[] pDacl, IntPtr pSacl);
+
+    public const int DACL_SECURITY_INFORMATION = 0x00000004;
+
+    // From: pinvoke.net/default.aspx/Structures/SECURITY_DESCRIPTOR.html
+    [StructLayoutAttribute(LayoutKind.Sequential)]
+    public struct SECURITY_DESCRIPTOR
+    {
+        public byte revision;
+        public byte size;
+        public short control;
+        public IntPtr owner;
+        public IntPtr group;
+        public IntPtr sacl;
+        public IntPtr dacl;
+    }
+
+    // Code of interest:
+    // https://github.com/ilikenwf/DarkAgent/blob/master/DarkAPI/Advapi32.cs
+
+
+
+    // Custom Enum for BuildExplicitAccessWithName
+    // Typs listed here on fn page - http://msdn.microsoft.com/en-us/library/windows/desktop/aa376378(v=vs.85).aspx
+    [Flags]
+    public enum EAInheritance : uint
+    {
+        NO_INHERITANCE = 0,                             // Build a completely new ACE (for a DACL)
+        OBJECT_INHERIT_ACE = 0x1,
+        CONTAINER_INHERIT_ACE = 0x2,                    // Combine: OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE to preserve the current ACE for the DACL
+        NO_PROPAGATE_INHERIT_ACE = 0x4,
+        INHERIT_ONLY_ACE = 0x8,
+        INHERITED_ACE = 0x10,
+        SUCCESSFUL_ACCESS_ACE_FLAG = 0x40,
+        FAILED_ACCESS_ACE_FLAG = 0x80
+    }
+
+
+    // NOTE: CharSet MUST be set to ANSI (CharSet.Ansi) for the TrusteeName to be entered correctly.
+    //       If it is set to CharSet.Auto that defaults to unicode so "Everyone" (for example) will only show up as "E" and SetEntriesInAcl will
+    //       return 1332 - No mapping between account names and security IDs was done.
+    //       As shown by someone whom didn't know here - http://stackoverflow.com/questions/8500535/using-setentriesinacl-in-c-sharp-error-1332
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    public static extern void BuildExplicitAccessWithName(
+        ref EXPLICIT_ACCESS pExplicitAccess,
+        string pTrusteeName,
+        ACCESS_MASK AccessPermissions,
+        ACCESS_MODE AccessMode,
+        EAInheritance Inheritance);
+
+
+    // From:
+    // http://stackoverflow.com/questions/5627438/a-working-net-example-using-setentriesinacl-interop-in-action
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern int SetEntriesInAcl(int countOfExplicitEntries, ref EXPLICIT_ACCESS explicitEntry, IntPtr oldAcl, out IntPtr newAcl);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool InitializeSecurityDescriptor(ref SECURITY_DESCRIPTOR pSecurityDescriptor, uint dwRevision);
+
+    //
+    // How to prevent users from killing your service or process
+    // http://csharptest.net/1043/how-to-prevent-users-from-killing-your-service-process/
+    // 
+
+    #endregion
+
+    #region Access Masks
+
+    #region Access Masks / Rights for Open[x]Object
+
+    /// <summary>
+    /// Generic Access Rights
+    /// </summary>
+    [Flags]
+    public enum ACCESS_MASK : uint
+    {
+        DELETE = 0x00010000,
+        /// <summary>
+        /// Read the current DACL
+        /// </summary>
+        READ_CONTROL = 0x00020000,
+        /// <summary>
+        /// Modify a DACL (current, assigning a new, etc)
+        /// </summary>
+        WRITE_DAC = 0x00040000,
+        /// <summary>
+        /// Change the object's Owner within the DACL
+        /// </summary>
+        WRITE_OWNER = 0x00080000,
+
+        SYNCHRONIZE = 0x00100000,
+
+        /// <summary>
+        /// Typically a part of the object-specific ALL ACCESS rights
+        /// </summary>
+        STANDARD_RIGHTS_REQUIRED = 0x000F0000,
+
+        STANDARD_RIGHTS_READ = 0x00020000,
+        STANDARD_RIGHTS_WRITE = 0x00020000,
+        STANDARD_RIGHTS_EXECUTE = 0x00020000,
+
+        STANDARD_RIGHTS_ALL = 0x001F0000,
+        SPECIFIC_RIGHTS_ALL = 0x0000FFFF,
+
+        ACCESS_SYSTEM_SECURITY = 0x01000000,
+
+        MAXIMUM_ALLOWED = 0x02000000,
+
+        GENERIC_READ = 0x80000000,
+        GENERIC_WRITE = 0x40000000,
+        GENERIC_EXECUTE = 0x20000000,
+
+        GENERIC_ALL = 0x10000000,
+    }
+
+
+    /// <summary>
+    /// Read an object's DACL (such as before setting the owner, or modifying an ACE entry)
+    /// </summary>
+    public const uint READ_CONTROL = 0x00020000;
+
+    /// <summary>
+    /// Modify an object's Owner. Usually paired with READ_CONTROL
+    /// </summary>
+    public const uint WRITE_OWNER = 0x00080000;
+
+    /// <summary>
+    /// Modify an object's DACL (such as adding in a new ACE entry). Usually paired with READ_CONTROL
+    /// </summary>
+    public const uint WRITE_DAC = 0x00040000;
+
+    public const uint GENERIC_READ = (0x80000000);
+    public const uint GENERIC_WRITE = (0x40000000);
+
+    public const uint STANDARD_RIGHTS_READ = 0x00020000;
+
+    /// <summary>
+    /// Typically a part of the object-specific ALL ACCESS rights
+    /// </summary>
+    public const uint STANDARD_RIGHTS_REQUIRED = 0x000F0000;
+
+
+    public const uint MAXIMUM_ALLOWED = 0x2000000;
+
+
+
+
+
+    /// <summary>
+    /// Process-specific access rights (For OpenProcess)
+    /// https://docs.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights
+    /// </summary>
+    [Flags]
+    public enum ProcessAccessFlags : uint
+    {
+        All = 0x001F0FFF | QueryInformation | QueryLimitedInformation,
+
+        /// <summary>
+        /// Required to terminate a process using TerminateProcess.
+        /// </summary>
+        Terminate = 0x00000001,
+
+        CreateThread = 0x00000002,
+
+        /// <summary>
+        /// Required to perform an operation on the address space of a process (see VirtualProtectEx and WriteProcessMemory).
+        /// </summary>
+        VMOperation = 0x00000008,
+
+        /// <summary>
+        /// Required to read memory in a process using ReadProcessMemory.
+        /// </summary>
+        VMRead = 0x00000010,
+
+        /// <summary>
+        /// Required to write to memory in a process using WriteProcessMemory.
+        /// </summary>
+        VMWrite = 0x00000020,
+
+        DupHandle = 0x00000040,
+
+        SetInformation = 0x00000200,
+
+        /// <summary>
+        /// Required to retrieve a process' token, exit code, and priority class
+        /// </summary>
+        QueryInformation = 0x00000400,
+
+        /// <summary>
+        /// Required to retrieve the following information: GetExitCodeProcess, GetPriorityClass, IsProcessInJob, QueryFullProcessImageName. 
+        /// A handle that has the PROCESS_QUERY_INFORMATION access right is automatically granted PROCESS_QUERY_LIMITED_INFORMATION
+        /// </summary>
+        QueryLimitedInformation = 0x1000,
+
+        /// <summary>
+        /// Required to wait for the process to terminate using the wait functions: docs.microsoft.com/en-us/windows/win32/sync/wait-functions?redirectedfrom=MSDN
+        /// </summary>
+        Synchronize = 0x00100000
+    }
+
+    /// <summary>
+    /// Thread-specific access rights (For OpenThread)
+    /// </summary>
+    [Flags]
+    public enum ThreadAccess : uint
+    {
+        TERMINATE = (0x0001),
+        SUSPEND_RESUME = (0x0002),
+        GET_CONTEXT = (0x0008),
+        SET_CONTEXT = (0x0010),
+        SET_INFORMATION = (0x0020),
+        QUERY_INFORMATION = (0x0040),
+        SET_THREAD_TOKEN = (0x0080),
+        IMPERSONATE = (0x0100),
+        DIRECT_IMPERSONATION = (0x0200),
+        THREAD_ALL_ACCESS = 0x1FFFFF
+    }
+
+
+    //
+    // Token-specific Access Rights (For OpenThreadToken, OpenProcessToken, DuplicateToken[Ex], granted by LogonUser, etc)
+    //
+    public const uint TOKEN_ASSIGN_PRIMARY = 0x0001;
+    public const uint TOKEN_DUPLICATE = 0x0002;
+    public const uint TOKEN_IMPERSONATE = 0x0004;
+    public const uint TOKEN_QUERY = 0x0008;
+    public const uint TOKEN_QUERY_SOURCE = 0x0010;
+    public const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
+    public const uint TOKEN_ADJUST_GROUPS = 0x0040;
+    public const uint TOKEN_ADJUST_DEFAULT = 0x0080;
+    public const uint TOKEN_ADJUST_SESSIONID = 0x0100;
+    public static uint TOKEN_READ = (STANDARD_RIGHTS_READ | TOKEN_QUERY);
+    public static uint TOKEN_ALL_ACCESS = (STANDARD_RIGHTS_REQUIRED | TOKEN_ASSIGN_PRIMARY |
+        TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_QUERY | TOKEN_QUERY_SOURCE |
+        TOKEN_ADJUST_PRIVILEGES | TOKEN_ADJUST_GROUPS | TOKEN_ADJUST_DEFAULT |
+        TOKEN_ADJUST_SESSIONID);
+
+
+
+    //
+    // Directory-specific Access Rights
+    //
+
+    /// <summary>
+    /// Directory Access Rights (5)
+    /// ZwCreateDirectoryObject - docs.microsoft.com/en-us/windows-hardware/drivers/ddi/content/wdm/nf-wdm-zwcreatedirectoryobject
+    /// Defined in ntos.h - github.com/hfiref0x/WinObjEx64/blob/master/Source/WinObjEx64/ntos/ntos.h
+    /// </summary>
+    [Flags]
+    public enum DIRECTORY_ACCESS : uint
+    {
+        DIRECTORY_QUERY = 0x00020000,
+        DIRECTORY_TRAVERSE = 0x00040000,
+        DIRECTORY_CREATE_OBJECT = 0x00080000,
+        DIRECTORY_CREATE_SUBDIRECTORY = 0x00100000,
+        DIRECTORY_ALL_ACCESS = ACCESS_MASK.STANDARD_RIGHTS_REQUIRED | 0xF
+    }
+
+    // docs.microsoft.com/en-us/windows/win32/devnotes/ntopendirectoryobject
+    //      + other directory rights defined here
+    public static uint DIRECTORY_ALL_ACCESS = STANDARD_RIGHTS_REQUIRED | 0xF;
+
+
+
+    /// <summary>
+    /// File-specific Access Rights: Full list of File access rights - blogs.msdn.microsoft.com/oldnewthing/20170310-00/?p=95705
+    /// </summary>
+    [Flags]
+    public enum FileAccessRights : int
+    {
+        ReadData = 0x0001,                  // FILE_READ_DATA
+        ListDirectory = 0x0001,
+        WriteData = 0x0002,                 // FILE_WRITE_DATA
+        AddFile = 0x0002,
+        AppendData = 0x0004,
+        AddSubdirectory = 0x0004,
+        CreatePipeInstance = 0x0004,
+        ReadEA = 0x0008,
+        WriteEA = 0x0010,
+        Execute = 0x0020,
+        Traverse = 0x0020,
+        DeleteChild = 0x0040,
+        ReadAttributes = 0x0080,
+        WriteAttributes = 0x0100,
+
+        AllAccess = (int)(
+            ACCESS_MASK.STANDARD_RIGHTS_REQUIRED |
+            ACCESS_MASK.SYNCHRONIZE |
+            0x1FF
+            ),
+
+        GenericRead = (int)(
+            ACCESS_MASK.STANDARD_RIGHTS_READ |
+            ReadData |
+            ReadAttributes |
+            ReadEA |
+            ACCESS_MASK.SYNCHRONIZE
+            ),
+
+        GenericWrite = (int)(
+            ACCESS_MASK.STANDARD_RIGHTS_WRITE |
+            WriteData |
+            WriteAttributes |
+            WriteEA |
+            AppendData |
+            ACCESS_MASK.SYNCHRONIZE
+            ),
+
+        GenericExecute = (int)(
+            ACCESS_MASK.STANDARD_RIGHTS_EXECUTE |
+            ReadAttributes |
+            Execute |
+            ACCESS_MASK.SYNCHRONIZE
+            ),
+    }
+
+    // github.com/SublimeText/Pywin32/issues/4
+    public const uint SYNCHRONIZE = 0x00100000;
+    public static uint FILE_ALL_ACCESS = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1ff;
+
+    #endregion
+
 
     #endregion
 
